@@ -1,0 +1,49 @@
+#!/bin/sh
+ 
+
+echo ------ CONFIG --------
+CFLAGS="-g -O2 -Wall" \
+	./configure \
+					--sbindir=/home/halgandd/bacula/bin \
+					--sysconfdir=/home/halgandd/bacula/bin \
+					--with-pid-dir=/home/halgandd/bacula/bin/working \
+					--with-subsys-dir=/home/halgandd/bacula/bin/working \
+					--enable-smartalloc \
+					--enable-tray-monitor \
+					--with-mysql \
+					--with-working-dir=/home/halgandd/bacula/bin/working 
+
+
+
+###############################################################################
+echo ------ COMPIL --------
+make | grep error
+###############################################################################
+echo ------ INSTALL --------
+make install | grep error
+###############################################################################
+echo ------ PREPAR --------
+
+
+
+cd /home/halgandd/bacula/bin
+./startmysql
+mkdir /home/halgandd/bacula/bin/working/pid
+mkdir /home/halgandd/bacula/bin/working/pid1
+./grant_mysql_privileges
+./create_mysql_database
+./make_mysql_tables
+./stopmysql
+
+
+###############################################################################
+
+
+
+
+
+
+
+
+
+
