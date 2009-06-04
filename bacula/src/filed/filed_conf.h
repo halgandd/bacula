@@ -41,6 +41,7 @@
 #define R_DIRECTOR                    1001
 #define R_CLIENT                      1002
 #define R_MSGS                        1003
+#define R_CONSOLE                     1004
 
 #define R_LAST                        R_MSGS
 
@@ -58,6 +59,8 @@ struct DIRRES {
    RES   hdr;
    char *password;                    /* Director password */
    char *address;                     /* Director address or zero */
+   uint32_t DIRport;                  /* UA server port */
+   utime_t heartbeat_interval;        /* Interval to send heartbeats to Dir */
    bool monitor;                      /* Have only access to status and .status functions */
    bool tls_authenticate;             /* Authenticate with TSL */
    bool tls_enable;                   /* Enable TLS */
@@ -82,6 +85,7 @@ struct CLIENT {
    char *subsys_directory;
    char *plugin_directory;            /* Plugin directory */
    char *scripts_directory;
+   bool initiate_jobs;
    MSGS *messages;                    /* daemon message handler */
    uint32_t MaxConcurrentJobs;
    utime_t SDConnectTimeout;          /* timeout in seconds */
@@ -107,7 +111,23 @@ struct CLIENT {
    char *verid;                       /* Custom Id to print in version command */
 };
 
-
+struct CONRES {
+   RES   hdr;
+   char *rc_file;                     /* startup file */
+   char *hist_file;                   /* command history file */
+   char *password;                    /* UA server password */
+   bool tls_authenticate;             /* Authenticate with TLS */
+   bool tls_enable;                   /* Enable TLS on all connections */
+   bool tls_require;                  /* Require TLS on all connections */
+   char *tls_ca_certfile;             /* TLS CA Certificate File */
+   char *tls_ca_certdir;              /* TLS CA Certificate Directory */
+   char *tls_certfile;                /* TLS Client Certificate File */
+   char *tls_keyfile;                 /* TLS Client Key File */
+   char *director;                    /* bind to director */
+   utime_t heartbeat_interval;        /* Interval to send heartbeats to Dir */
+   alist *jobstostart;
+   TLS_CONTEXT *tls_ctx;              /* Shared TLS Context */
+};
 
 /* Define the Union of all the above
  * resource structure definitions.
@@ -117,4 +137,5 @@ union URES {
    CLIENT res_client;
    MSGS   res_msgs;
    RES    hdr;
+   CONRES res_cons;
 };

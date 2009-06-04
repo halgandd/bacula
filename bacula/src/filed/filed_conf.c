@@ -64,6 +64,7 @@ RES **res_head = sres_head;
 
 /* Forward referenced subroutines */
 
+void store_job(LEX *lc, RES_ITEM *item, int index, int pass);
 
 /* We build the current resource here as we are
  * scanning the resource configuration definition,
@@ -92,6 +93,7 @@ static RES_ITEM cli_items[] = {
    {"fdaddress",   store_addresses_address, ITEM(res_client.FDaddrs),  0, ITEM_DEFAULT, 9102},
    {"fdaddresses", store_addresses,         ITEM(res_client.FDaddrs),  0, ITEM_DEFAULT, 9102},
    {"fdsourceaddress", store_addresses_address, ITEM(res_client.FDsrc_addr),  0, ITEM_DEFAULT, 0},
+   {"initiatejobs",        store_bool,       ITEM(res_client.initiate_jobs),     0, ITEM_DEFAULT, 0},
 
    {"workingdirectory",  store_dir, ITEM(res_client.working_directory), 0, ITEM_REQUIRED, 0},
    {"piddirectory",  store_dir,     ITEM(res_client.pid_directory),     0, ITEM_REQUIRED, 0},
@@ -127,6 +129,8 @@ static RES_ITEM dir_items[] = {
    {"description", store_str,      ITEM(res_dir.hdr.desc),  0, 0, 0},
    {"password",    store_password, ITEM(res_dir.password),  0, ITEM_REQUIRED, 0},
    {"address",     store_str,      ITEM(res_dir.address),   0, 0, 0},
+   {"dirport",        store_pint32,    ITEM(res_dir.DIRport),  0, ITEM_REQUIRED, 0},
+   {"heartbeatinterval", store_time, ITEM(res_dir.heartbeat_interval), 0, ITEM_DEFAULT, 0},
    {"monitor",     store_bool,   ITEM(res_dir.monitor),   0, ITEM_DEFAULT, 0},
    {"tlsauthenticate",      store_bool,    ITEM(res_dir.tls_authenticate), 0, 0, 0},
    {"tlsenable",            store_bool,    ITEM(res_dir.tls_enable), 0, 0, 0},
@@ -138,6 +142,26 @@ static RES_ITEM dir_items[] = {
    {"tlskey",               store_dir,       ITEM(res_dir.tls_keyfile), 0, 0, 0},
    {"tlsdhfile",            store_dir,       ITEM(res_dir.tls_dhfile), 0, 0, 0},
    {"tlsallowedcn",         store_alist_str, ITEM(res_dir.tls_allowed_cns), 0, 0, 0},
+   {NULL, NULL, {0}, 0, 0, 0}
+};
+
+/*  Console "globals" */
+static RES_ITEM cons_items[] = {
+   {"name",           store_name,     ITEM(res_cons.hdr.name), 0, ITEM_REQUIRED, 0},
+   {"description",    store_str,      ITEM(res_cons.hdr.desc), 0, 0, 0},
+   {"rcfile",         store_dir,      ITEM(res_cons.rc_file), 0, 0, 0},
+   {"historyfile",    store_dir,      ITEM(res_cons.hist_file), 0, 0, 0},
+   {"password",       store_password, ITEM(res_cons.password), 0, ITEM_REQUIRED, 0},
+   {"tlsauthenticate",store_bool,    ITEM(res_cons.tls_authenticate), 0, 0, 0},
+   {"tlsenable",      store_bool,    ITEM(res_cons.tls_enable), 0, 0, 0},
+   {"tlsrequire",     store_bool,    ITEM(res_cons.tls_require), 0, 0, 0},
+   {"tlscacertificatefile", store_dir, ITEM(res_cons.tls_ca_certfile), 0, 0, 0},
+   {"tlscacertificatedir", store_dir,  ITEM(res_cons.tls_ca_certdir), 0, 0, 0},
+   {"tlscertificate", store_dir,       ITEM(res_cons.tls_certfile), 0, 0, 0},
+   {"tlskey",         store_dir,       ITEM(res_cons.tls_keyfile), 0, 0, 0},
+   {"director",       store_str,       ITEM(res_cons.director), 0, ITEM_REQUIRED, 0},
+   {"heartbeatinterval", store_time, ITEM(res_cons.heartbeat_interval), 0, ITEM_DEFAULT, 0},
+   {"jobstostart",       store_job,  ITEM(res_cons.jobstostart),     0, 0, 0},
    {NULL, NULL, {0}, 0, 0, 0}
 };
 
@@ -153,6 +177,7 @@ RES_TABLE resources[] = {
    {"filedaemon",    cli_items,   R_CLIENT},
    {"client",        cli_items,   R_CLIENT},     /* alias for filedaemon */
    {"messages",      msgs_items,  R_MSGS},
+   {"console",       cons_items,  R_CONSOLE},
    {NULL,            NULL,        0}
 };
 
@@ -176,6 +201,10 @@ void dump_resource(int type, RES *reshdr, void sendit(void *sock, const char *fm
       sendit(sock, "Director: name=%s password=%s\n", reshdr->name,
               res->res_dir.password);
       break;
+   case R_CONSOLE:
+      sendit(sock, "Console: name=%s password=%s\n", reshdr->name,
+              res->res_cons.password);
+      break;
    case R_CLIENT:
       sendit(sock, "Client: name=%s FDport=%d\n", reshdr->name,
               get_first_port_host_order(res->res_client.FDaddrs));
@@ -193,6 +222,28 @@ void dump_resource(int type, RES *reshdr, void sendit(void *sock, const char *fm
    if (recurse && res->res_dir.hdr.next) {
       dump_resource(type, res->res_dir.hdr.next, sendit, sock);
    }
+}
+
+void store_job(LEX *lc, RES_ITEM *item, int index, int pass)
+{
+   int token;
+   for (;;) {
+      token = lex_get_token(lc, T_STRING);
+      if (pass == 1) {
+         if (((alist **)item->value)[item->code] == NULL) {
+            ((alist **)item->value)[item->code] = New(alist(10, owned_by_alist));
+            Dmsg1(900, "Defined new ACL alist at %d\n", item->code);
+         }
+         ((alist **)item->value)[item->code]->append(bstrdup(lc->str));
+         Dmsg2(900, "Appended to %d %s\n", item->code, lc->str);
+      }
+      token = lex_get_token(lc, T_ALL);
+      if (token == T_COMMA) {
+         continue;                    /* get another ACL */
+      }
+      break;
+   }
+   set_bit(index, res_all.hdr.item_present);
 }
 
 /*
@@ -247,6 +298,32 @@ void free_resource(RES *sres, int type)
       }
       if (res->res_dir.tls_allowed_cns) {
          delete res->res_dir.tls_allowed_cns;
+      }
+      break;
+   case R_CONSOLE:
+      if (res->res_cons.rc_file) {
+         free(res->res_cons.rc_file);
+      }
+      if (res->res_cons.hist_file) {
+         free(res->res_cons.hist_file);
+      }
+      if (res->res_cons.tls_ctx) { 
+         free_tls_context(res->res_cons.tls_ctx);
+      }
+      if (res->res_cons.tls_ca_certfile) {
+         free(res->res_cons.tls_ca_certfile);
+      }
+      if (res->res_cons.tls_ca_certdir) {
+         free(res->res_cons.tls_ca_certdir);
+      }
+      if (res->res_cons.tls_certfile) {
+         free(res->res_cons.tls_certfile);
+      }
+      if (res->res_cons.tls_keyfile) {
+         free(res->res_cons.tls_keyfile);
+      }
+      if (res->res_cons.jobstostart) {
+         delete res->res_cons.jobstostart;
       }
       break;
    case R_CLIENT:
@@ -382,6 +459,11 @@ void save_resource(int type, RES_ITEM *items, int pass)
             }
             res->res_dir.tls_allowed_cns = res_all.res_dir.tls_allowed_cns;
             break;
+         case R_CONSOLE :
+            if ((res = (URES *)GetResWithName(R_CONSOLE, res_all.res_cons.hdr.name)) == NULL) {
+               Emsg1(M_ABORT, 0, _("Cannot find Console resource %s\n"), res_all.res_cons.hdr.name);
+            }
+            break;
          case R_CLIENT:
             if ((res = (URES *)GetResWithName(R_CLIENT, res_all.res_dir.hdr.name)) == NULL) {
                Emsg1(M_ABORT, 0, _("Cannot find Client resource %s\n"), res_all.res_dir.hdr.name);
@@ -417,6 +499,9 @@ void save_resource(int type, RES_ITEM *items, int pass)
    switch (type) {
       case R_DIRECTOR:
          size = sizeof(DIRRES);
+         break;
+      case R_CONSOLE:
+         size = sizeof(CONRES);
          break;
       case R_CLIENT:
          size = sizeof(CLIENT);

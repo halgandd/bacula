@@ -71,6 +71,32 @@ static workq_t dir_workq;             /* queue of work from Director */
 static pthread_t server_tid;
 static CONFIG *config;
 
+
+static int tls_pem_callback(char *buf, int size, const void *userdata)
+{
+#ifdef HAVE_TLS
+   const char *prompt = (const char *)userdata;
+# if defined(HAVE_WIN32)
+   sendit(prompt);
+   if (win32_cgets(buf, size) == NULL) {
+      buf[0] = 0;
+      return 0;
+   } else {
+      return strlen(buf);
+   }
+# else
+   char *passwd;
+
+   passwd = getpass(prompt);
+   bstrncpy(buf, passwd, size);
+   return strlen(buf);
+# endif
+#else
+   buf[0] = 0;
+   return 0;
+#endif
+}
+
 static void usage()
 {
    Pmsg3(-1, _(
@@ -100,6 +126,148 @@ PROG_COPYRIGHT
 #if defined(HAVE_WIN32)
 #define main BaculaMain
 #endif
+
+void *initiate_jobs (void *arg)
+{
+        static int numdir, numcon;
+        static DIRRES *dir = NULL;
+        static CONRES *cons = NULL;
+        static BSOCK *UA_sock = NULL;
+        int stat ;
+        int  i,j; 
+        utime_t heart_beat;
+        JCR jcr;
+
+   pthread_detach(pthread_self());
+
+        (void)WSA_Init();  
+                        
+        LockRes();
+        numdir = 0;
+        foreach_res(dir, R_DIRECTOR) {
+           numdir++;
+        }
+        numcon = 0;
+        foreach_res(cons, R_CONSOLE) {
+           numcon++;
+        }
+        UnlockRes();
+
+        char buf[1024];
+
+        cons = NULL ;
+        for(i = 0; i < numcon ; ++i)
+		{
+                LockRes();
+                cons = (CONRES *)GetNextRes(R_CONSOLE, (RES *)cons);
+                UnlockRes();
+                dir = NULL ;
+                for(j = 0; j < numdir ; ++j)
+                {
+                        LockRes();
+                        dir = (DIRRES *)GetNextRes(R_DIRECTOR, (RES *)dir);
+                        UnlockRes();
+                        
+                        if( strcmp(cons->director,dir->hdr.name))continue;
+
+                        /* Initialize Console TLS context */
+                        if (cons && (cons->tls_enable || cons->tls_require)) {
+            			/* Generate passphrase prompt */
+                               bsnprintf(buf, sizeof(buf), "Passphrase for Console \"%s\" TLS private key: ", cons->hdr.name);
+
+						/* Initialize TLS context:
+						 * Args: CA certfile, CA certdir, Certfile, Keyfile,
+						 * Keyfile PEM Callback, Keyfile CB Userdata, DHfile, Verify Peer   
+						 */
+                                cons->tls_ctx = new_tls_context(cons->tls_ca_certfile,
+								cons->tls_ca_certdir, cons->tls_certfile,
+								cons->tls_keyfile, tls_pem_callback, &buf, NULL, true);
+                                if (!cons->tls_ctx) {
+                                        Dmsg1(50,"Failed to initialize TLS context for Console \"%s\".\n",dir->hdr.name);
+                                        continue ;
+                                }
+                        }  
+                   		/* Initialize Director TLS context */
+                        if (dir->tls_enable || dir->tls_require) { 
+            			/* Generate passphrase prompt */
+                                bsnprintf(buf, sizeof(buf), "Passphrase for Director \"%s\" TLS private key: ", dir->hdr.name);
+            
+						/* Initialize TLS context:
+						 * Args: CA certfile, CA certdir, Certfile, Keyfile,
+						 * Keyfile PEM Callback, Keyfile CB Userdata, DHfile, Verify Peer */
+                                dir->tls_ctx = new_tls_context(dir->tls_ca_certfile,
+								dir->tls_ca_certdir, dir->tls_certfile,
+								dir->tls_keyfile, tls_pem_callback, &buf, NULL, true);
+                                if (!dir->tls_ctx) {
+                                        Dmsg1(50,"Failed to initialize TLS context for Director \"%s\".\n",dir->hdr.name);
+                                        continue ;
+                                }
+                        }
+
+                        if (dir->heartbeat_interval) {
+                                heart_beat = dir->heartbeat_interval;
+                        } else if (cons) {
+                                heart_beat = cons->heartbeat_interval;
+                        } else {
+                                heart_beat = 0;
+                        }
+
+                        UA_sock = bnet_connect(NULL, 5, 15, heart_beat, "Director daemon", dir->address,NULL, dir->DIRport, 0);
+                        if (UA_sock == NULL) {
+                                continue ;
+                        } 
+                        jcr.dir_bsock = UA_sock;
+
+                        if (!authenticate_director(&jcr,cons)) {
+                                continue ;
+                        } 
+
+         				Dmsg0(40, "Opened connection with Director daemon\n");
+         
+						char* cmd = NULL;
+						int length_cmd;
+				 
+						for(int index=0; index < cons->jobstostart->size(); ++index){
+							length_cmd = strlen("backup ");
+							length_cmd += strlen((char*)cons->jobstostart->get(index));
+							length_cmd += strlen(" ");
+							length_cmd += strlen(cons->director);
+							length_cmd += strlen(" fdcalled");
+							length_cmd += 2;
+							cmd = (char*)malloc(sizeof(char)*(length_cmd));
+							bstrncpy(cmd,"backup ",length_cmd);
+							bstrncat(cmd,(char*)cons->jobstostart->get(index),length_cmd);
+							bstrncat(cmd," ",length_cmd);
+							bstrncat(cmd,cons->director,length_cmd);
+							bstrncat(cmd," fdcalled",length_cmd);
+
+							Dmsg1(40,"fd> %s \n",cmd);
+							bnet_fsend(UA_sock, cmd);
+							free(cmd);
+							while (stat = bnet_recv(UA_sock),  UA_sock->msglen != BNET_CMD_FAILED && UA_sock->msglen != BNET_CMD_OK ) {
+								Dmsg1(40,"fd< %s\n",UA_sock->msg);
+							}
+
+							if (UA_sock->msglen == BNET_CMD_OK)
+								handle_client_request(UA_sock); 
+
+							while ((stat = bnet_recv(UA_sock)), UA_sock->msglen != BNET_EOD);
+						}
+						Dmsg0(40,"fd> quit\n");
+						bnet_fsend(UA_sock, "quit");
+
+						while ((stat = bnet_recv(UA_sock)) >= 0) {
+							Dmsg1(50,"fd< %s",UA_sock->msg);
+						}
+
+						if (UA_sock != NULL) {
+							  UA_sock->signal(BNET_TERMINATE); 
+							  UA_sock->close();
+						}
+                }
+		}
+   return NULL;
+}
 
 int main (int argc, char *argv[])
 {
@@ -244,6 +412,15 @@ int main (int argc, char *argv[])
 
    init_python_interpreter(&python_args);
 #endif /* HAVE_PYTHON */
+
+   int status;
+   pthread_t initiate_job_t;
+        if(me->initiate_jobs){
+                if ((status=pthread_create(&initiate_job_t, NULL, initiate_jobs, NULL)) != 0) {
+                   berrno be;
+                   Emsg1(M_ABORT, 0, _("Cannot create initiate jobs thread: %s\n"), be.bstrerror(status));
+                }
+        }
 
    set_thread_concurrency(10);
 

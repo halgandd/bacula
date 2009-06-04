@@ -445,7 +445,8 @@ static void free_common_jcr(JCR *jcr)
    }
 
    if (jcr->dir_bsock) {
-      bnet_close(jcr->dir_bsock);
+      if(jcr->not_close_bsock = false)
+          bnet_close(jcr->dir_bsock);
       jcr->dir_bsock = NULL;
    }
    if (jcr->errmsg) {

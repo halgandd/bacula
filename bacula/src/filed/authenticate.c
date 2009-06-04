@@ -304,3 +304,109 @@ auth_fatal:
    }
    return auth_success;
 }
+
+
+int authenticate_director(JCR *jcr, CONRES *cons)
+{
+   BSOCK *dir = jcr->dir_bsock;
+   int tls_local_need = BNET_TLS_NONE;
+   int tls_remote_need = BNET_TLS_NONE;
+   bool tls_needed;
+   bool tls_authenticate = false;
+   int compatible = true;
+   char bashed_name[MAX_NAME_LENGTH];
+   char *password = NULL;
+   TLS_CONTEXT *tls_ctx = NULL;
+
+        static char hello[]    = "Hello %s calling\n";
+        static char OKhello[]   = "1000 OK:";
+
+   /*
+    * Send my name to the Director then do authentication
+    */
+   if (cons) {
+      bstrncpy(bashed_name, cons->hdr.name, sizeof(bashed_name));
+      bash_spaces(bashed_name);
+      password = cons->password;
+      /* TLS Requirement */
+      if (cons->tls_enable) {
+         if (cons->tls_require) {
+            tls_local_need = BNET_TLS_REQUIRED;
+         } else {
+            tls_local_need = BNET_TLS_OK;
+         }
+      }
+      if (cons->tls_authenticate) {
+         tls_local_need = BNET_TLS_REQUIRED;
+      }
+      tls_authenticate = cons->tls_authenticate;
+      tls_needed = cons->tls_enable || cons->tls_authenticate;
+      tls_ctx = cons->tls_ctx;
+   } 
+   
+   /* Timeout Hello after 5 mins */
+   btimer_t *tid = start_bsock_timer(dir, 60 * 5);
+   dir->fsend(hello, bashed_name);
+
+   if (!cram_md5_respond(dir, password, &tls_remote_need, &compatible) ||
+       !cram_md5_challenge(dir, password, tls_local_need, compatible)) {
+      goto bail_out;
+   }
+
+   /* Verify that the remote host is willing to meet our TLS requirements */
+   if (tls_remote_need < tls_local_need && tls_local_need != BNET_TLS_OK && tls_remote_need != BNET_TLS_OK) {
+      Jmsg(jcr, M_FATAL, 0, _("Authorization problem: Remote server did not" 
+                                                " advertize required TLS support.\n"));
+      Dmsg2(dbglvl, "remote_need=%d local_need=%d\n", tls_remote_need, tls_local_need);
+      goto bail_out;
+   }
+
+   /* Verify that we are willing to meet the remote host's requirements */
+   if (tls_remote_need > tls_local_need && tls_local_need != BNET_TLS_OK && tls_remote_need != BNET_TLS_OK) {
+      Jmsg(jcr, M_FATAL, 0, _("Authorization problem: Remote server requires TLS.\n"));
+      Dmsg2(dbglvl, "remote_need=%d local_need=%d\n", tls_remote_need, tls_local_need);
+      goto bail_out;
+   }
+
+   /* Is TLS Enabled? */
+   if (tls_local_need >= BNET_TLS_OK && tls_remote_need >= BNET_TLS_OK) {
+      /* Engage TLS! Full Speed Ahead! */
+      if (!bnet_tls_client(tls_ctx, dir, NULL)) {
+         Jmsg(jcr, M_FATAL, 0, _("TLS negotiation failed.\n"));
+         goto bail_out;
+      }
+      if (tls_authenticate) {           /* Authenticate only? */
+         dir->free_tls();               /* yes, shutdown tls */
+      }
+   }
+
+   /*
+    * It's possible that the TLS connection will
+    * be dropped here if an invalid client certificate was presented
+    */
+   Dmsg1(6, ">dird: %s", dir->msg);
+   if (dir->recv() <= 0) {
+      Jmsg1(jcr, M_FATAL, 0, _("Bad response to Hello command: ERR=%s\n"),dir->bstrerror());
+      goto bail_out;
+   }
+
+   Dmsg1(10, "<dird: %s", dir->msg);
+   if (strncmp(dir->msg, OKhello, sizeof(OKhello)-1) != 0) {
+      Jmsg0(jcr, M_FATAL, 0, _("Director rejected Hello command\n"));
+      goto bail_out;
+   } else {
+      Dmsg1(50, "%s", dir->msg);
+   }
+   stop_bsock_timer(tid);
+   return 1;
+
+bail_out:
+
+   stop_bsock_timer(tid);
+
+   Jmsg0(jcr, M_FATAL, 0, _("Director authorization problem.\n"
+             "Most likely the passwords do not agree.\n"
+             "If you are using TLS, there may have been a certificate validation error during the TLS handshake.\n"
+             "Please see http://www.bacula.org/en/rel-manual/Bacula_Freque_Asked_Questi.html#SECTION003760000000000000000 for help.\n"));
+   return 0;
+}

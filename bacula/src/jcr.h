@@ -239,6 +239,7 @@ public:
    bool authenticated;                /* set when client authenticated */
    void *Python_job;                  /* Python Job Object */
    void *Python_events;               /* Python Events Object */
+   bool not_close_bsock;
 
    bool cached_attribute;             /* set if attribute is cached */
    POOLMEM *attr;                     /* Attribute string from SD */

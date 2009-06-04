@@ -33,6 +33,7 @@ extern bool blast_data_to_storage_daemon(JCR *jcr, char *addr);
 extern void do_verify_volume(JCR *jcr);
 extern void do_restore(JCR *jcr);
 extern int authenticate_director(JCR *jcr);
+extern int authenticate_director(JCR *jcr, CONRES *cons);
 extern int authenticate_storagedaemon(JCR *jcr);
 extern int make_estimate(JCR *jcr);
 

@@ -210,6 +210,7 @@ void *handle_client_request(void *dirp)
 
    jcr = new_jcr(sizeof(JCR), filed_free_jcr); /* create JCR */
    jcr->dir_bsock = dir;
+   if(dir) jcr->not_close_bsock = true ; else jcr->not_close_bsock = false ;
    jcr->ff = init_find_files();
    jcr->start_time = time(NULL);
    jcr->RunScripts = New(alist(10, not_owned_by_alist));
@@ -1847,9 +1848,11 @@ static int open_sd_read_session(JCR *jcr)
  */
 static void filed_free_jcr(JCR *jcr)
 {
-   if (jcr->store_bsock) {
-      jcr->store_bsock->close();
-   }
+   if(jcr->not_close_bsock = false){
+      if (jcr->store_bsock) {
+         jcr->store_bsock->close();
+      } 
+   } 
    free_bootstrap(jcr);
    if (jcr->last_fname) {
       free_pool_memory(jcr->last_fname);

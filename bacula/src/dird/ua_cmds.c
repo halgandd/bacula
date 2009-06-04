@@ -98,6 +98,7 @@ static int use_cmd(UAContext *ua, const char *cmd);
 static int var_cmd(UAContext *ua, const char *cmd);
 static int version_cmd(UAContext *ua, const char *cmd);
 static int wait_cmd(UAContext *ua, const char *cmd);
+static int backup_cmd(UAContext *ua, const char *cmd);
 
 static void do_job_delete(UAContext *ua, JobId_t JobId);
 static void delete_job_id_range(UAContext *ua, char *tok);
@@ -165,7 +166,8 @@ static struct cmdstruct commands[] = {                                      /* C
  { NT_("var"),        var_cmd,       _("does variable expansion"),                    false},
  { NT_("version"),    version_cmd,   _("print Director version"),                     true},
  { NT_("wait"),       wait_cmd,      _("wait [<jobname=name> | <jobid=nnn> | <ujobid=complete_name>] -- "
-       "\n               wait until no jobs are running"), false}
+       "\n               wait until no jobs are running"), false},
+ { NT_("backup"),     backup_cmd,      _("backup [dir=<dir-name> | <jobname=name>] -- do job"), true}
 };
 
 #define comsize ((int)(sizeof(commands)/sizeof(struct cmdstruct)))
@@ -1815,6 +1817,119 @@ int wait_cmd(UAContext *ua, const char *cmd)
    return 1;
 }
 
+int backup_cmd(UAContext *ua, const char *cmd)
+{
+   JOB *job;
+   DIRRES *dir;
+        int numjob = 0 ;
+        int numdir = 0 ;
+        char jobok = 0 ;
+        char dirok = 0 ;
+
+        for (int i=1; i<ua->argc; i++) {
+                Dmsg2(50,"----> %d : %s\n",i,ua->argk[i]);
+   }
+        Dmsg1(50,"nombre d'arguments : %d \n",ua->argc );
+
+        LockRes();
+   Dmsg0(50,"===JOB===\n");
+   foreach_res(job, R_JOB) {
+                ++numjob;
+      //Dmsg2(50,"---> %d : %s\n",numjob,job->hdr.name);
+   } 
+   Dmsg0(50,"===DIRECTOR===\n");
+   foreach_res(dir, R_DIRECTOR) {
+                ++numdir;
+      //Dmsg2(50,"---> %d : %s\n",numdir,dir->hdr.name);
+   } 
+   UnlockRes();
+
+        if (ua->argc >= 3)
+        {
+                Dmsg0(50,"===SELECTION===\n");
+                dir = NULL ;
+                for(int i = 0 ; i < numdir ; ++i)
+                {
+                        LockRes();
+                        dir = (DIRRES *)GetNextRes(R_DIRECTOR, (RES *)dir);
+                        UnlockRes();
+                   Dmsg2(50,"---> %d : %s\n",i,dir->hdr.name);
+                        if (!strcmp(ua->argk[2], dir->hdr.name)) {
+                                dirok = 1 ;
+                                break;
+                        }
+                }
+                job = NULL ;
+                for(int i = 0 ; i < numjob ; ++i)
+                {
+                        LockRes();
+                        job = (JOB *)GetNextRes(R_JOB, (RES *)job);
+                        UnlockRes();
+                   Dmsg2(50,"---> %d : %s\n",i,job->hdr.name);
+                        if (!strcmp(ua->argk[1], job->hdr.name)){       
+                                jobok = 1 ;
+                                break;
+                        }
+                }
+
+                if ( !jobok ) { job = NULL ; }
+                if ( !dirok ) { dir = NULL ; }
+        } 
+
+        if ( !jobok || !dirok ) {
+                if (ua->argc < 3) Dmsg0(50,"error backup : missing arguments\n");
+                if (!job) Dmsg0(50,"error backup : bad job\n");
+                if (!dir) Dmsg0(50,"error backup : bad dir\n");
+                ua->signal(BNET_CMD_FAILED);
+           ua->signal(BNET_EOD);
+                return 0;
+        }
+        
+        if ( job->JobType != JT_BACKUP) {
+                Dmsg0(50,"error this job is not a backup \n");
+                ua->signal(BNET_CMD_FAILED);
+           ua->signal(BNET_EOD);  
+                return 0;
+        }
+
+        unsigned int JobId ;
+        JCR *jcr = NULL;
+        jcr = new_jcr(sizeof(JCR), dird_free_jcr);
+        set_jcr_defaults(jcr, job);
+
+   jcr->file_bsock = dup_bsock(ua->UA_sock);
+
+        Dmsg3(100, "JobId=%u using pool %s priority=%d\n", (int)jcr->JobId, jcr->pool->name(), jcr->JobPriority);
+        Dmsg1(900, "Running a job; its spool_data = %d\n", jcr->spool_data);
+        JobId = run_job(jcr);
+        Dmsg4(100,"JobId=%u NewJobId=%d using pool %s priority=%d\n",(int)jcr->JobId,JobId,jcr->pool->name(),jcr->JobPriority);
+        free_jcr(jcr);   
+        
+        if (JobId == 0) {
+                ua->signal(BNET_CMD_FAILED);
+       } else {
+                char ed1[50];
+                ua->send_msg(_("JobId=%s\n"), edit_int64(JobId, ed1));
+                ua->signal(BNET_CMD_OK);
+        }
+
+        char ok = 0 ;
+        while(!ok)
+        {
+                if (last_jobs->empty())continue;
+                lock_last_jobs_list();
+                struct s_last_job *je;
+                foreach_dlist(je, last_jobs) {
+                        if(je->JobId == JobId)
+                                ++ok;
+                }
+                unlock_last_jobs_list();
+                bmicrosleep(1, 0);
+        }
+
+        ua->signal(BNET_EOD);                   
+        return 1 ;
+}
 
 static int help_cmd(UAContext *ua, const char *cmd)
 {

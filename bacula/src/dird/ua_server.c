@@ -147,7 +147,8 @@ static void *handle_UA_client_request(void *arg)
          }
          dequeue_messages(ua->jcr);
          if (!ua->quit) {
-            if (console_msg_pending && acl_access_ok(ua, Command_ACL, "messages", 8)) {
+            if (console_msg_pending && acl_access_ok(ua, Command_ACL, "messages", 8)
+                                    && (find_arg(ua, NT_("fdcalled")) <= 0)) {
                if (ua->auto_display_messages) {
                   pm_strcpy(ua->cmd, "messages");
                   qmessagescmd(ua, ua->cmd);
