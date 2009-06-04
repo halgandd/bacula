@@ -176,7 +176,7 @@ RES_TABLE resources[] = {
    {"filedaemon",    cli_items,   R_CLIENT},
    {"client",        cli_items,   R_CLIENT},     /* alias for filedaemon */
    {"messages",      msgs_items,  R_MSGS},
-   {"console",      cons_items,  R_CONSOLE},
+   {"console",       cons_items,  R_CONSOLE},
    {NULL,            NULL,        0}
 };
 
@@ -298,9 +298,6 @@ void free_resource(RES *sres, int type)
      }
       if (res->res_cons.tls_keyfile) {
          free(res->res_cons.tls_keyfile);
-      }
-      if (res->res_cons.jobstostart) {
-         delete res->res_cons.jobstostart;
       }
       break;
    case R_CLIENT:

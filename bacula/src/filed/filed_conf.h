@@ -135,5 +135,6 @@ union URES {
    DIRRES res_dir;
    CLIENT res_client;
    MSGS   res_msgs;
+   CONRES res_cons;
    RES    hdr;
 };
