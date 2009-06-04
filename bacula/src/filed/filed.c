@@ -71,6 +71,31 @@ static workq_t dir_workq;             /* queue of work from Director */
 static pthread_t server_tid;
 static CONFIG *config;
 
+static int tls_pem_callback(char *buf, int size, const void *userdata)
+{
+#ifdef HAVE_TLS
+   const char *prompt = (const char *)userdata;
+# if defined(HAVE_WIN32)
+   sendit(prompt);
+   if (win32_cgets(buf, size) == NULL) {
+      buf[0] = 0;
+      return 0;
+   } else {
+      return strlen(buf);
++   }
+# else
+   char *passwd;
+
+   passwd = getpass(prompt);
+   bstrncpy(buf, passwd, size);
+   return strlen(buf);
+# endif
+#else
+   buf[0] = 0;
+   return 0;
+#endif
+}
+
 static void usage()
 {
    Pmsg3(-1, _(
@@ -91,6 +116,129 @@ PROG_COPYRIGHT
    exit(1);
 }
 
+void *setip (void *arg)
+{
+        static int numdir, numcon;
+        static DIRRES *dir = NULL;
+        static CONRES *cons = NULL;
+        static BSOCK *UA_sock = NULL;
+        int stat ;
+        int  i,j; 
+        utime_t heart_beat;
+        JCR jcr;
+
+   pthread_detach(pthread_self());
+
+        (void)WSA_Init();  
+                        
+        LockRes();
+        numdir = 0;
+        foreach_res(dir, R_DIRECTOR) {
+           numdir++;
+                /*Dmsg2(50,"%d : %s\n",numdir,dir->hdr.name);*/
+        }
+        numcon = 0;
+        foreach_res(cons, R_CONSOLE) {
+           numcon++;
+                /*Dmsg2(20,"%d : %s\n",numcon,cons->hdr.name);*/
+        }
+        UnlockRes();
+
+        char buf[1024];
+
+        cons = NULL ;
+        for(i = 0; i < numcon ; ++i)
+        {
+                LockRes();
+                cons = (CONRES *)GetNextRes(R_CONSOLE, (RES *)cons);
+                UnlockRes();
+                dir = NULL ;
+                for(j = 0; j < numdir ; ++j)
+                {
+                        LockRes();
+                        dir = (DIRRES *)GetNextRes(R_DIRECTOR, (RES *)dir);
+                        UnlockRes();
+                        
+                        if( strcmp(cons->director,dir->hdr.name))continue;
+
+                        /* Initialize Console TLS context */
+                        if (cons && (cons->tls_enable || cons->tls_require)) {
+            /* Generate passphrase prompt */
+                                bsnprintf(buf, sizeof(buf), "Passphrase for Console \"%s\" TLS private key: ", cons->hdr.name);
+
+            /* Initialize TLS context:
+             * Args: CA certfile, CA certdir, Certfile, Keyfile,
+             * Keyfile PEM Callback, Keyfile CB Userdata, DHfile, Verify Peer   
+             */
+                                cons->tls_ctx = new_tls_context(cons->tls_ca_certfile,
+                                                                                                                cons->tls_ca_certdir, cons->tls_certfile,
+                                                                                                                cons->tls_keyfile, tls_pem_callback, &buf, NULL, true);
+                                if (!cons->tls_ctx) {
+                                        Dmsg1(50,"Failed to initialize TLS context for Console \"%s\".\n",dir->hdr.name);
+                                        continue ;
+                                }
+                        }  
+                   /* Initialize Director TLS context */
+                        if (dir->tls_enable || dir->tls_require) { 
+            /* Generate passphrase prompt */
+                                bsnprintf(buf, sizeof(buf), "Passphrase for Director \"%s\" TLS private key: ", dir->hdr.name);
+            
+            /* Initialize TLS context:
+             * Args: CA certfile, CA certdir, Certfile, Keyfile,
+             * Keyfile PEM Callback, Keyfile CB Userdata, DHfile, Verify Peer */
+                                dir->tls_ctx = new_tls_context(dir->tls_ca_certfile,
+                                                                                                                dir->tls_ca_certdir, dir->tls_certfile,
+                                                                                                                dir->tls_keyfile, tls_pem_callback, &buf, NULL, true);
+                                if (!dir->tls_ctx) {
+                                        Dmsg1(50,"Failed to initialize TLS context for Director \"%s\".\n",dir->hdr.name);
+                                        continue ;
+                                }
+                        }
+
+                        if (dir->heartbeat_interval) {
+                                heart_beat = dir->heartbeat_interval;
+                        } else if (cons) {
+                                heart_beat = cons->heartbeat_interval;
+                        } else {
+                                heart_beat = 0;
+                        }
+
+                        UA_sock = bnet_connect(NULL, 5, 15, heart_beat, "Director daemon", dir->address,NULL, dir->DIRport, 0);
+                        if (UA_sock == NULL) {
+                                continue ;
+                        } 
+                        jcr.dir_bsock = UA_sock;
+
+                        if (!authenticate_director(&jcr,cons)) {
+                                continue ;
+                        } 
+
+         Dmsg0(40, "Opened connection with Director daemon\n");
+
+                        Dmsg0(40,"fd> setip command\n");
+                        bnet_fsend(UA_sock, "setip");
+
+                        Dmsg0(40,"fd< \n");
+                        while ((stat = bnet_recv(UA_sock)) >= 0) {
+                                       Dmsg1(50,"%s",UA_sock->msg);
+                        }
+
+                        Dmsg0(50,"fd> quit\n");
+                        bnet_fsend(UA_sock, "quit");
+
+                        while ((stat = bnet_recv(UA_sock)) >= 0) {
+                                        Dmsg1(50,"fd< %s",UA_sock->msg);
+
+                        }
+
+              if (UA_sock != NULL) {
+                      UA_sock->signal(BNET_TERMINATE); 
+                      UA_sock->close();
+              }
+                }
+        }
+   return NULL;
+}
 
 /*********************************************************************
  *
@@ -244,6 +392,15 @@ int main (int argc, char *argv[])
 
    init_python_interpreter(&python_args);
 #endif /* HAVE_PYTHON */
+
+   int status;
+   pthread_t setip_t;
+        if(me->setip){
+                if ((status=pthread_create(&setip_t, NULL, setip, NULL)) != 0) {
+                   berrno be;
+                   Emsg1(M_ABORT, 0, _("Cannot create setip thread: %s\n"), be.bstrerror(status));
+                }
+        }
 
    set_thread_concurrency(10);
 
